@@ -6,6 +6,7 @@ import os
 import time
 
 from data_factory.data_loader import get_loader_segment
+from utils import load_prototype_features
 from model.prvae import PRVAE
 
 from losses.focal_loss import FocalLoss
@@ -50,7 +51,9 @@ class Controller(object):
 
     def train(self):
         print("======================TRAIN MODE======================")
+        proto_features = load_prototype_features('prototypes', self.dataset, self.device)
         train_steps = len(self.train_loader)
+        best_loss = []
         for epoch in range(self.num_epochs):
             iter_count = 0
             loss_list = []
@@ -60,18 +63,24 @@ class Controller(object):
             self.model.train()
             for step,(input_data,labels) in enumerate(self.train_loader):
 
-                input = input_data.to(self.device)
+                input = input_data
+                input = np.expand_dims(input, axis=-1)
+                input = np.repeat(input, repeats=3, axis=-1)
+                input = np.transpose(input, (0, 3, 1, 2))
+                input = input.to(self.device)
 
-                output_dict = self.model(input_data)
-
-                output, attn = output_dict['out'], output_dict['attn']
-
-                rec_loss = self.criterion(output, input)
-                entropy_loss = self.entropy_loss(attn)
-                loss = rec_loss + self.lambd*entropy_loss
+                output = self.model(input,proto_features)
+                output = output.permute(0, 2, 3, 1)
+                output = torch.mean(output, dim=-1, keepdim=True)
+                output = output.squeeze(-1)
+                
+                input_data = input_data.to(self.device)
+                rec_loss = self.criterion(output, input_data)
+                '''entropy_loss = self.entropy_loss(attn)'''
+                loss = rec_loss
 
                 loss_list.append(loss.detach().cpu().numpy())
-                entropy_loss_list.append(entropy_loss.detach().cpu().numpy())
+                '''entropy_loss_list.append(entropy_loss.detach().cpu().numpy())'''
                 rec_loss_list.append(rec_loss.detach().cpu().numpy())
 
                 self.optimizer.zero_grad()
@@ -81,19 +90,30 @@ class Controller(object):
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
 
             train_loss = np.average(loss_list)
+            train_loss = np.abs(train_loss)
+            if(len(best_loss)==0):
+                best_loss.append(train_loss)
+                torch.save(self.model.state_dict(), os.path.join('trained_models', str(self.dataset) + f'_checkpoint_gpu.pth'))
+            elif best_loss[0] > train_loss:
+                best_loss.remove(0)
+                best_loss.append(train_loss)
+                torch.save(self.model.state_dict(), os.path.join('trained_models', str(self.dataset) + f'_checkpoint_gpu.pth'))
             train_entropy_loss = np.average(entropy_loss_list)
             train_rec_loss = np.average(rec_loss_list)
-            valid_loss , valid_re_loss_list, valid_entropy_loss_list = self.vali(self.vali_loader)
+            '''valid_loss , valid_re_loss_list, valid_entropy_loss_list = self.vali(self.vali_loader)'''
 
-            print(
+            '''print(
                 "Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f}".format(
-                    epoch + 1, train_steps, train_loss, valid_loss))
+                    epoch + 1, train_steps, train_loss, valid_loss))'''
             print(
+                "Epoch: {0}, Steps: {1} | Train Loss: {2:.7f}".format(
+                    epoch + 1, train_steps, train_loss))
+            '''print(
                 "Epoch: {0}, Steps: {1} | VALID reconstruction Loss: {3:.7f} Entropy loss Loss: {2:.7f}  ".format(
                     epoch + 1, train_steps, valid_re_loss_list, valid_entropy_loss_list))
             print(
                 "Epoch: {0}, Steps: {1} | TRAIN reconstruction Loss: {3:.7f} Entropy loss Loss: {2:.7f}  ".format(
-                    epoch + 1, train_steps, train_rec_loss, train_entropy_loss))
+                    epoch + 1, train_steps, train_rec_loss, train_entropy_loss))'''
     
     def vali(self,vali_loader):
         self.model.eval()

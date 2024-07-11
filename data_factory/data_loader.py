@@ -44,7 +44,7 @@ class SMDSegLoader(Dataset):
 
 def get_loader_segment(data_path, batch_size, win_size=100, step=100, mode="train", dataset="SMD", val_ratio=0.2):
 
-    if (dataset == 'SMD'):
+    if (dataset == "SMD"):
         dataset = SMDSegLoader(data_path, win_size, step, mode)
     
     shuffle = False
