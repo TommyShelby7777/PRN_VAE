@@ -3,109 +3,138 @@ import timm
 import torch
 from torch import Tensor
 import torch.nn as nn
-import torch.nn.functional as F
-from .attention import AttentionLayer
-from .embedding import TokenEmbedding, InputEmbedding
+from model.modules import MultiScaleFusion
+from model.attention import MultiSizeAttentionModule
+from utils import get_prototype_features, get_residual_features, get_concatenated_features
 
-
-class EncoderLayer(nn.Module):
-    def __init__(self, attn, d_model, d_ff=None, dropout=0.1, activation='relu'):
-        super(EncoderLayer, self).__init__()
-        d_ff = d_ff if d_ff is not None else 4 * d_model
-        self.attn_layer = attn
-        self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
-        self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(p=dropout)
-        self.activation = F.relu if activation == 'relu' else F.gelu
-
-    def forward(self, x):
-        '''
-        x : N x L x C(=d_model)
-        '''
-        out = self.attn_layer(x)
-        x = x + self.dropout(out)
-        y = x = self.norm1(x)
-        y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
-        y = self.dropout(self.conv2(y).transpose(-1, 1))
-
-        return self.norm2(x + y)    # N x L x C(=d_model)
-
-class Encoder(nn.Module):
-    def __init__(self, attn_layers, norm_layer=None):
-        super(Encoder, self).__init__()
-        self.attn_layers = nn.ModuleList(attn_layers)
-        self.norm = norm_layer
-
-    def forward(self, x):
-        '''
-        x : N x L x C(=d_model)
-        '''
-        for attn_layer in self.attn_layers:
-            x = attn_layer(x)
-
-        if self.norm is not None:
-            x = self.norm(x)
-
-        return x
-    
-class Decoder(nn.Module):
-    def __init__(self, d_model, c_out, d_ff=None, activation='relu', dropout=0.1):
-        super(Decoder, self).__init__()
-        # self.decoder_layer = nn.LSTM(input_size=d_model, hidden_size=d_model, num_layers=2,
-        #                              batch_first=True, bidirectional=True)
-        self.out_linear = nn.Linear(d_model, c_out)
-        d_ff = d_ff if d_ff is not None else 4 * d_model
-        self.decoder_layer1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
-
-        # self.decoder_layer_add = nn.Conv1d(in_channels=d_ff, out_channels=d_ff, kernel_size=1)
-
-        self.decoder_layer2 = nn.Conv1d(in_channels=d_ff, out_channels=c_out, kernel_size=1)
-        self.activation = F.relu if activation == 'relu' else F.gelu
-        self.dropout = nn.Dropout(p=dropout)
-        self.batchnorm = nn.BatchNorm1d(d_ff)
-
-    def forward(self, x):
-        '''
-        x : N x L x C(=d_model)
-        '''
-        # out = self.decoder_layer1(x.transpose(-1, 1))
-        # out = self.dropout(self.activation(self.batchnorm(out)))
-
-        # decoder ablation
-        # for _ in range(10):
-        #     out = self.dropout(self.activation(self.decoder_layer_add(out)))
-
-        # out = self.decoder_layer2(out).transpose(-1, 1)     
-        '''
-        out : reconstructed output
-        '''
-        out = self.out_linear(x)
-        return out      # N x L x c_out
 
 class PRVAE(nn.Module):
-    def __init__(self, win_size, enc_in, c_out, n_memory, shrink_thres=0, \
-                 d_model=512, n_heads=8, e_layers=3, d_ff=512, dropout=0.0, activation='gelu', \
-                 device=None, memory_init_embedding=None, memory_initial=False, phase_type=None, dataset_name=None):
-        super(PRVAE, self).__init__()
-
-        self.memory_initial = memory_initial
-
-        # Encoding
-        self.embedding = InputEmbedding(in_dim=enc_in, d_model=d_model, dropout=dropout, device=device)   # N x L x C(=d_model)
+    def __init__(self, 
+                 backbone: str,
+                 num_classes: int = 2,
+                 input_size: tuple = (32, 38),
+                 layers: tuple = (1, 2, 3, 4),
+                 device: torch.device = torch.device('cuda')):
+        super().__init__()
         
-        # Encoder
-        self.encoder = Encoder(
-            [
-                EncoderLayer(
-                    AttentionLayer(
-                        win_size, d_model, n_heads, dropout=dropout
-                    ), d_model, d_ff, dropout=dropout, activation=activation
-                ) for _ in range(e_layers)
-            ],
-            norm_layer = nn.LayerNorm(d_model)
+        self.backbone = backbone
+       
+        encoder = timm.create_model(backbone, features_only=True, 
+            out_indices=layers, pretrained=True).eval()
+        self.encoder = encoder.to(device)
+        
+        featuremap_dims = dryrun_find_featuremap_dims(self.encoder, input_size, len(layers), device)
+        # Feature map height and width
+        self.heights, self.widths, self.feature_dimensions = [], [], []
+        for i in range(len(layers)):
+            size = featuremap_dims[i]['resolution']
+            self.heights.append(size[0])
+            self.widths.append(size[1])
+            self.feature_dimensions.append(featuremap_dims[i]['num_features'])
+        
+        self.ms_fuser1 = MultiScaleFusion(self.feature_dimensions[:-1])
+        in_channels = [dim * 2 for dim in self.feature_dimensions[:-1]]
+        self.ms_fuser2 = MultiScaleFusion(in_channels)
+        self.attn_module = MultiSizeAttentionModule(in_channels, self.heights[:-1])
+        
+        self.up4_to_3 = nn.Sequential(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+                                 nn.Conv2d(self.feature_dimensions[3], self.feature_dimensions[2], kernel_size=3, padding=1),
+                                 nn.BatchNorm2d(self.feature_dimensions[2]),
+                                 nn.ReLU(inplace=True))
+        self.conv_block3 = nn.Sequential(
+            nn.Conv2d(self.feature_dimensions[2] * 3, self.feature_dimensions[2], kernel_size=3, padding=1),
+            nn.BatchNorm2d(self.feature_dimensions[2]),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.feature_dimensions[2], self.feature_dimensions[2], kernel_size=3, padding=1),
+            nn.BatchNorm2d(self.feature_dimensions[2]),
+            nn.ReLU(inplace=True)
         )
 
+        self.up3_to_2 = nn.Sequential(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+                                 nn.Conv2d(self.feature_dimensions[2], self.feature_dimensions[1], kernel_size=3, padding=1),
+                                 nn.BatchNorm2d(self.feature_dimensions[1]),
+                                 nn.ReLU(inplace=True))
+        self.conv_block2 = nn.Sequential(
+            nn.Conv2d(self.feature_dimensions[1] * 3, self.feature_dimensions[1], kernel_size=3, padding=1),
+            nn.BatchNorm2d(self.feature_dimensions[1]),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.feature_dimensions[1], self.feature_dimensions[1], kernel_size=3, padding=1),
+            nn.BatchNorm2d(self.feature_dimensions[1]),
+            nn.ReLU(inplace=True)
+        )
 
-        self.weak_decoder = Decoder(2* d_model, c_out, d_ff=d_ff, activation='gelu', dropout=0.1)
+        self.up2_to_1 = nn.Sequential(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+                                 nn.Conv2d(self.feature_dimensions[1], self.feature_dimensions[0], kernel_size=3, padding=1),
+                                 nn.BatchNorm2d(self.feature_dimensions[0]),
+                                 nn.ReLU(inplace=True))
+        self.conv_block1 = nn.Sequential(
+            nn.Conv2d(self.feature_dimensions[0] * 3, self.feature_dimensions[0], kernel_size=3, padding=1),
+            nn.BatchNorm2d(self.feature_dimensions[0]),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.feature_dimensions[0], self.feature_dimensions[0], kernel_size=3, padding=1),
+            nn.BatchNorm2d(self.feature_dimensions[0]),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.up1_to_0 = nn.Sequential(nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True),
+                                 nn.Conv2d(self.feature_dimensions[0], self.feature_dimensions[0], kernel_size=3, padding=1),
+                                 nn.BatchNorm2d(self.feature_dimensions[0]),
+                                 nn.ReLU(inplace=True))
+
+        self.conv_out = nn.Conv2d(self.feature_dimensions[0], num_classes, kernel_size=3, padding=1)
+    
+    def forward(self, images: Tensor, proto_features: List[Tensor]):
+        with torch.no_grad():
+            features = self.encoder(images)
+        layer4_features = features[-1]
+        features = features[:-1]
+            
+        pfeatures = get_prototype_features(features, proto_features)
+        rfeatures = get_residual_features(features, pfeatures)
+        
+        # multi-scale fusion
+        features = self.ms_fuser1(*features)
+        rfeatures = self.ms_fuser1(*rfeatures)
+        
+        # concatenate the input features and the residual features
+        cfeatures = get_concatenated_features(features, rfeatures)
+        
+        # attention modules
+        features = self.attn_module(cfeatures)
+        features = self.ms_fuser2(*features)
+        
+        # decoder
+        layer3_features = self.up4_to_3(layer4_features)
+        layer3_features = torch.cat([features[2], layer3_features], dim=1)
+        layer3_features = self.conv_block3(layer3_features)
+        
+        layer2_features = self.up3_to_2(layer3_features)
+        layer2_features = torch.cat([features[1], layer2_features], dim=1)
+        layer2_features = self.conv_block2(layer2_features)
+        
+        layer1_features = self.up2_to_1(layer2_features)
+        layer1_features = torch.cat([features[0], layer1_features], dim=1)
+        layer1_features = self.conv_block1(layer1_features)
+
+        out_features = self.up1_to_0(layer1_features)
+        out = self.conv_out(out_features)
+        
+        return out
+
+
+def dryrun_find_featuremap_dims(
+    feature_extractor,
+    input_size: tuple[int, int],
+    num_layers: list[str],
+    device: torch.device = torch.device('cuda')
+) -> dict[str, int | tuple[int, int]]:
+    
+    dryrun_input = torch.empty(1, 3, *input_size, device=device)
+    dryrun_features = feature_extractor(dryrun_input)
+    
+    featuremap_dims = []
+    for i in range(num_layers):
+        featuremap_dims.append({"num_features": dryrun_features[i].shape[1], "resolution": dryrun_features[i].shape[2:]})
+    
+    return featuremap_dims
+    

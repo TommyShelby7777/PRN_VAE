@@ -12,14 +12,14 @@ device = 'cuda'
 root_dir = '/data2/yxc/datasets/mvtec_anomaly_detection'
 
 
-def create_proto_feature_maps(class_name, batch_size=32, win_size=32, dataset="SMD", data_path="./datasets", ratio=0.1):
+def create_proto_feature_maps(class_name, batch_size=32, win_size=32, dataset="SMD", data_path="datasets", val_ratio=0.1):
     '''train_dataset = MVTEC(root_dir, class_name=class_name, train=True, img_size=256, crp_size=256,
                           msk_size=256, msk_crp_size=256)
     train_loader = DataLoader(
         train_dataset, batch_size=32, shuffle=True, num_workers=8, drop_last=False
     )'''
-    train_loader, vali_loader, k_loader = get_loader_segment(data_path, batch_size=batch_size, win_size=win_size, 
-                                                                                mode="train", dataset=dataset)
+    train_loader, vali_loader, k_loader = get_loader_segment(data_path, batch_size=batch_size, win_size=100, step=100, 
+                                                                                mode="train", dataset=dataset,val_ratio=val_ratio)
     encoder = timm.create_model("resnet18", features_only=True, 
             out_indices=(1, 2, 3), pretrained=True).eval()
     encoder = encoder.to(device)
@@ -52,7 +52,7 @@ def create_proto_feature_maps(class_name, batch_size=32, win_size=32, dataset="S
     layer2_features = layer2_features.reshape(N, -1)
     layer3_features = layer3_features.reshape(N, -1)
     
-    K = int(N * ratio)
+    K = int(N * val_ratio)
     
     print("fitting layer1...")
     kmeans = KMeans(n_clusters=K, random_state=0)
@@ -80,7 +80,7 @@ def create_proto_feature_maps(class_name, batch_size=32, win_size=32, dataset="S
 
 if __name__ == '__main__':
     class_name = "SMD"
-    create_proto_feature_maps(class_name, batch_size=32, win_size=32, dataset="SMD", data_path="datasets", ratio=0.1)
+    create_proto_feature_maps(class_name, batch_size=32, win_size=100, step=100, dataset="SMD", data_path="datasets", val_ratio=0.1)
     
 
     

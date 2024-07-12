@@ -31,6 +31,7 @@ class Controller(object):
         self.thre_loader = self.vali_loader
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.backbone = "resnet18"
 
         self.build_model()
 
@@ -42,7 +43,8 @@ class Controller(object):
 
     
     def build_model(self):
-        self.model = PRVAE()
+        input_size = (self.win_size,self.input_c)
+        self.model = PRVAE(self.backbone, num_classes=1, input_size=input_size,device=self.device).to(self.device)
 
         self.optimizer = torch.optim.Adam(self.model.parameters(),lr=self.lr)
 

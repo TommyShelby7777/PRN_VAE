@@ -13,13 +13,13 @@ class SMDSegLoader(Dataset):
         self.step = step
         self.win_size = win_size
         self.scaler = StandardScaler()
-        data = np.load(os.path.join(data_path,"SMD_train.py"))
+        data = np.load(os.path.join(data_path,"smd_train_merged.npy"))
         self.scaler.fit(data)
         data = self.scaler.transform(data)
-        test_data = np.load(os.path.join(data_path,"SMD_test.npy"))
+        test_data = np.load(os.path.join(data_path,"smd_test.npy"))
         self.test = self.scaler.transform(test_data)
         self.train = data
-        self.test_labels = np.load(os.path.join(data_path,"SMD_test_label.npy"))
+        self.test_labels = np.load(os.path.join(data_path,"smd_test_label.npy"))
         print("test:", self.test.shape)
         print("train:", self.train.shape)
 
@@ -42,7 +42,7 @@ class SMDSegLoader(Dataset):
         else:
             return np.float32(self.train[index:index + self.win_size]),np.float32(self.test_labels[0:self.win_size])
 
-def get_loader_segment(data_path, batch_size, win_size=100, step=100, mode="train", dataset="SMD", val_ratio=0.2):
+def get_loader_segment(data_path, batch_size, win_size=100, step=100, mode="train", dataset="SMD", val_ratio=0.1):
 
     if (dataset == "SMD"):
         dataset = SMDSegLoader(data_path, win_size, step, mode)
